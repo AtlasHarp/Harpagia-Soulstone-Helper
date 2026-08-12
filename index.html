@@ -80,9 +80,10 @@ header h1{
   border-radius:16px;
   box-shadow:0 2px 12px rgba(0,0,0,0.25);
 }
-.chance-row-labels{display:flex;flex-direction:column;gap:3px}
+.chance-row-labels{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
 .chance-row label{color:#d4c9a8;white-space:nowrap;font-weight:500;font-size:14px}
 .chance-hint{font-size:11px;color:#8a8078}
+.chance-row{--chip-h:37px}
 .ci-display{
   background:rgba(4,16,14,0.8);
   border:1px solid rgba(242,200,107,0.28);
@@ -91,6 +92,8 @@ header h1{
   padding:6px 18px;border-radius:999px;
   font-family:'Manrope',sans-serif;
   flex-shrink:0;
+  height:var(--chip-h);box-sizing:border-box;
+  display:inline-flex;align-items:center;justify-content:center;
 }
 
 /* ── Stat cards ── */
@@ -117,7 +120,7 @@ header h1{
 .stat-inputs{display:flex;flex-direction:column;gap:10px}
 .record-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .btn-success,.btn-failure{
-  padding:8px 0;border:none;border-radius:8px;font-size:13px;font-weight:600;
+  padding:16px 0;border:none;border-radius:8px;font-size:13px;font-weight:600;
   cursor:pointer;transition:filter 0.15s,transform 0.1s;letter-spacing:0.02em;
 }
 .btn-success{background:rgba(50,180,160,0.18);color:#7ecfd4;border:1px solid rgba(50,180,160,0.3)}
@@ -135,6 +138,19 @@ header h1{
   transition:color 0.15s,border-color 0.15s;
 }
 .btn-reset:hover{color:#7ecfd4;border-color:rgba(70,180,160,0.4)}
+.btn-reset:disabled{opacity:.30;cursor:not-allowed;pointer-events:none}
+/* Undo / Reset chips: locked to the same height as .ci-display, roomier horizontally */
+.chance-row .btn-reset{
+  height:var(--chip-h);box-sizing:border-box;
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:0 26px;font-size:13px;font-family:inherit;
+}
+/* Below ~940px the row runs out of horizontal room: trim the chips and let the
+   label text wrap, so the chips stay together on one line instead of overflowing */
+@media (max-width:940px){
+  .chance-row .btn-reset{padding:0 16px}
+  .chance-row label{white-space:normal}
+}
 
 /* ── Diamonds ── */
 .diamonds{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
@@ -230,6 +246,7 @@ header h1{
   .chance-row { padding: 10px 10px; gap: 8px; }
   .chance-row-labels { flex: 1; min-width: 0; }
   .chance-row label { white-space: normal; }
+  .chance-row .btn-reset { padding: 0 14px; font-size: 12px; }
 }
 
 /* ── Splash ── */
@@ -382,7 +399,8 @@ body.body-splash .tab-content { display:none !important; }
           <label>Current Success Chance</label>
           <span class="chance-hint">Oscillates 25–75% with each enchant result</span>
         </div>
-        <button id="global-reset-btn" class="btn-reset" style="flex-shrink:0;padding:8px 16px;font-size:12.6px;white-space:nowrap;color:#e09090;border-color:rgba(200,80,80,0.25);">Reset Tool</button>
+        <button id="global-undo-btn" class="btn-reset" style="flex-shrink:0;white-space:nowrap;color:#9de8d0;border-color:rgba(70,180,160,0.28);" disabled>↶ Undo</button>
+        <button id="global-reset-btn" class="btn-reset" style="flex-shrink:0;white-space:nowrap;color:#e09090;border-color:rgba(200,80,80,0.25);">Reset Tool</button>
         <span id="ci-display" class="ci-display">75%</span>
       </div>
 
@@ -430,7 +448,8 @@ body.body-splash .tab-content { display:none !important; }
           <label>Current Success Chance</label>
           <span class="chance-hint">Oscillates 25–75% with each enchant result</span>
         </div>
-        <button id="s6-global-reset-btn" class="btn-reset" style="flex-shrink:0;padding:8px 16px;font-size:12.6px;white-space:nowrap;color:#e09090;border-color:rgba(200,80,80,0.25);">Reset Tool</button>
+        <button id="s6-global-undo-btn" class="btn-reset" style="flex-shrink:0;white-space:nowrap;color:#9de8d0;border-color:rgba(70,180,160,0.28);" disabled>↶ Undo</button>
+        <button id="s6-global-reset-btn" class="btn-reset" style="flex-shrink:0;white-space:nowrap;color:#e09090;border-color:rgba(200,80,80,0.25);">Reset Tool</button>
         <span id="s6-ci-display" class="ci-display">75%</span>
       </div>
 
@@ -854,6 +873,12 @@ const statState = [
   {att:0,suc:0,history:[]},
 ];
 
+// Undo log: one entry per recorded action, newest last.
+// prevCI must be stored, not recomputed — CI_WIN/CI_LOSE are not injective
+// (CI_WIN[0]===CI_WIN[1]===0, CI_LOSE[4]===CI_LOSE[5]===5).
+const undoStack = [];
+const cardUpdaters = [];
+
 function buildDiamonds(container, isCurse, att, suc, history) {
   container.innerHTML='';
   for(let i=0;i<MAX_ATT;i++) {
@@ -909,11 +934,14 @@ STAT_NAMES.forEach((name, si) => {
     attValEl.textContent = att;
     sucValEl.textContent = suc;
     buildDiamonds(diaEl, STAT_CURSE[si], att, suc, history);
+    updateUndoBtn();
     triggerManualLookup();
   }
+  cardUpdaters[si] = update;
 
   document.getElementById(`btn-suc-${si}`).addEventListener('click', () => {
     if(statState[si].att >= 10) return;
+    undoStack.push({si, won:true, prevCI:currentCI});
     statState[si].history.push(true);
     statState[si].att++;
     statState[si].suc++;
@@ -923,6 +951,7 @@ STAT_NAMES.forEach((name, si) => {
   });
   document.getElementById(`btn-fail-${si}`).addEventListener('click', () => {
     if(statState[si].att >= 10) return;
+    undoStack.push({si, won:false, prevCI:currentCI});
     statState[si].history.push(false);
     statState[si].att++;
     currentCI = CI_LOSE[currentCI];
@@ -930,6 +959,22 @@ STAT_NAMES.forEach((name, si) => {
     update();
   });
   buildDiamonds(diaEl, STAT_CURSE[si], 0, 0, []);
+});
+
+function updateUndoBtn() {
+  document.getElementById('global-undo-btn').disabled = undoStack.length === 0;
+}
+
+document.getElementById('global-undo-btn').addEventListener('click', () => {
+  const last = undoStack.pop();
+  if(!last) return;
+  const s = statState[last.si];
+  s.history.pop();
+  s.att--;
+  if(last.won) s.suc--;
+  currentCI = last.prevCI;
+  document.getElementById('ci-display').textContent = CHANCE_LIST[currentCI] + '%';
+  cardUpdaters[last.si]();
 });
 
 let currentCI = 5;
@@ -945,6 +990,8 @@ document.getElementById('global-reset-btn').addEventListener('click', () => {
     buildDiamonds(diaEl, STAT_CURSE[si], 0, 0, []);
   });
   currentCI = 5;
+  undoStack.length = 0;
+  updateUndoBtn();
   document.getElementById('ci-display').textContent = '75%';
   document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('highlighted'));
   triggerManualLookup();
@@ -1064,6 +1111,8 @@ const statState666 = [
   {att:0,suc:0,history:[]},
 ];
 let currentCI666 = 5;
+const undoStack666 = [];
+const cardUpdaters666 = [];
 
 const statRowsEl666 = document.getElementById('s6-stat-rows');
 STAT_NAMES.forEach((name, si) => {
@@ -1103,11 +1152,14 @@ STAT_NAMES.forEach((name, si) => {
     attValEl.textContent = att;
     sucValEl.textContent = suc;
     buildDiamonds(diaEl, STAT_CURSE[si], att, suc, history);
+    updateUndoBtn666();
     triggerLookup666();
   }
+  cardUpdaters666[si] = update666;
 
   document.getElementById(`s6-btn-suc-${si}`).addEventListener('click', () => {
     if(statState666[si].att >= 10) return;
+    undoStack666.push({si, won:true, prevCI:currentCI666});
     statState666[si].history.push(true);
     statState666[si].att++;
     statState666[si].suc++;
@@ -1117,6 +1169,7 @@ STAT_NAMES.forEach((name, si) => {
   });
   document.getElementById(`s6-btn-fail-${si}`).addEventListener('click', () => {
     if(statState666[si].att >= 10) return;
+    undoStack666.push({si, won:false, prevCI:currentCI666});
     statState666[si].history.push(false);
     statState666[si].att++;
     currentCI666 = CI_LOSE[currentCI666];
@@ -1124,6 +1177,22 @@ STAT_NAMES.forEach((name, si) => {
     update666();
   });
   buildDiamonds(diaEl, STAT_CURSE[si], 0, 0, []);
+});
+
+function updateUndoBtn666() {
+  document.getElementById('s6-global-undo-btn').disabled = undoStack666.length === 0;
+}
+
+document.getElementById('s6-global-undo-btn').addEventListener('click', () => {
+  const last = undoStack666.pop();
+  if(!last) return;
+  const s = statState666[last.si];
+  s.history.pop();
+  s.att--;
+  if(last.won) s.suc--;
+  currentCI666 = last.prevCI;
+  document.getElementById('s6-ci-display').textContent = CHANCE_LIST[currentCI666] + '%';
+  cardUpdaters666[last.si]();
 });
 
 document.getElementById('s6-global-reset-btn').addEventListener('click', () => {
@@ -1134,6 +1203,8 @@ document.getElementById('s6-global-reset-btn').addEventListener('click', () => {
     buildDiamonds(document.getElementById(`s6-dia-${si}`), STAT_CURSE[si], 0, 0, []);
   });
   currentCI666 = 5;
+  undoStack666.length = 0;
+  updateUndoBtn666();
   document.getElementById('s6-ci-display').textContent = '75%';
   document.querySelectorAll('#tab-666 .stat-card').forEach(c => c.classList.remove('highlighted'));
   triggerLookup666();
